@@ -1,6 +1,7 @@
 package rke
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/blang/semver"
@@ -37,12 +38,13 @@ type Data struct {
 
 	K8sVersionDockerInfo map[string][]string
 
-	K8sVersionWindowsSystemImages   map[string]v3.WindowsSystemImages
+	// K8sVersionWindowsServiceOptions - service options per windows k8s version
 	K8sVersionWindowsServiceOptions map[string]v3.KubernetesServicesOptions
 }
 
 var (
 	DriverData Data
+	TemplateData  map[string]map[string]string
 	m          = image.Mirror
 )
 
@@ -62,7 +64,6 @@ func init() {
 	DriverData.RancherDefaultK8sVersions = loadRancherDefaultK8sVersions()
 
 	validateDefaultPresent(DriverData.RKEDefaultK8sVersions)
-	validateDefaultPresent(DriverData.RancherDefaultK8sVersions)
 
 	DriverData.K8sVersionedTemplates = templates.LoadK8sVersionedTemplates()
 
@@ -73,7 +74,6 @@ func init() {
 	DriverData.K8sVersionInfo = loadK8sVersionInfo()
 
 	// init Windows versions
-	DriverData.K8sVersionWindowsSystemImages = loadK8sVersionWindowsSystemimages()
 	DriverData.K8sVersionWindowsServiceOptions = loadK8sVersionWindowsServiceOptions()
 	DriverData.K8sVersionDockerInfo = loadK8sVersionDockerInfo()
 
@@ -88,33 +88,38 @@ func validateDefaultPresent(versions map[string]string) {
 }
 
 func validateTemplateMatch() {
+	TemplateData = map[string]map[string]string{}
 	for k8sVersion := range DriverData.K8sVersionRKESystemImages {
-		toMatch, err := semver.Make(k8sVersion[1:])
+		toMatch, err := semver.Make(strings.Split(k8sVersion[1:], "-rancher")[0])
 		if err != nil {
 			panic(fmt.Sprintf("k8sVersion not sem-ver %s %v", k8sVersion, err))
 		}
+		TemplateData[k8sVersion] = map[string]string{}
 		for plugin, pluginData := range DriverData.K8sVersionedTemplates {
 			if plugin == templates.TemplateKeys {
 				continue
 			}
+			matchedKey := ""
 			matchedRange := ""
-			for toTestRange := range pluginData {
+			for toTestRange, key := range pluginData {
 				testRange, err := semver.ParseRange(toTestRange)
 				if err != nil {
 					panic(fmt.Sprintf("range for %s not sem-ver %v %v", plugin, testRange, err))
 				}
 				if testRange(toMatch) {
 					// only one range should be matched
-					if matchedRange != "" {
+					if matchedKey != "" {
 						panic(fmt.Sprintf("k8sVersion %s for plugin %s passing range %s, conflict range matching with %s",
 							k8sVersion, plugin, toTestRange, matchedRange))
 					}
+					matchedKey = key
 					matchedRange = toTestRange
 				}
 			}
-			if matchedRange == "" {
+			if matchedKey == "" {
 				panic(fmt.Sprintf("no template found for k8sVersion %s plugin %s", k8sVersion, plugin))
 			}
+			TemplateData[k8sVersion][plugin] = fmt.Sprintf("range=%s key=%s", matchedRange, matchedKey)
 		}
 	}
 }
@@ -124,6 +129,17 @@ func GenerateData() {
 		splitStr := strings.SplitN(os.Args[1], "=", 2)
 		if len(splitStr) == 2 {
 			if splitStr[0] == "--write-data" && splitStr[1] == "true" {
+				
+				buf := new(bytes.Buffer)
+				enc := json.NewEncoder(buf)
+				enc.SetEscapeHTML(false)
+				enc.SetIndent("", " ")
+
+				if err := enc.Encode(TemplateData); err != nil {
+					panic(fmt.Sprintf("error encoding template data %v", err))
+				}
+				fmt.Println(buf.String())
+
 				fmt.Println("generating data.json")
 				//todo: zip file
 				strData, _ := json.MarshalIndent(DriverData, "", " ")
